@@ -757,33 +757,40 @@ struct llama_model_loader {
 
             load_data_for(lt);
 
-            switch(lt.ggml_tensor->backend) {
-                case GGML_BACKEND_CPU:
-                    lt.ggml_tensor->data = lt.data;
-                    if (use_mmap && lmlock) {
-                        lock_size += lt.size;
-                        lmlock->grow_to(lock_size);
-                    }
-                    break;
-#if defined(GGML_USE_CUBLAS)
-                case GGML_BACKEND_GPU:
-                case GGML_BACKEND_GPU_SPLIT:
-                    ggml_cuda_transform_tensor(lt.data, lt.ggml_tensor);
-                    if (!use_mmap) {
-                        free(lt.data);
-                    }
-                    break;
-#elif defined(GGML_USE_CLBLAST)
-                case GGML_BACKEND_GPU:
-                    ggml_cl_transform_tensor(lt.data, lt.ggml_tensor);
-                    if (!use_mmap) {
-                        free(lt.data);
-                    }
-                    break;
-#endif
-                default:
-                    continue;
+            // The whole model in CPU at first
+            lt.ggml_tensor->data = lt.data;
+            if (use_mmap && lmlock) {
+                lock_size += lt.size;
+                lmlock->grow_to(lock_size);
             }
+
+//             switch(lt.ggml_tensor->backend) {
+//                 case GGML_BACKEND_CPU:
+//                     lt.ggml_tensor->data = lt.data;
+//                     if (use_mmap && lmlock) {
+//                         lock_size += lt.size;
+//                         lmlock->grow_to(lock_size);
+//                     }
+//                     break;
+// #if defined(GGML_USE_CUBLAS)
+//                 case GGML_BACKEND_GPU:
+//                 case GGML_BACKEND_GPU_SPLIT:
+//                     ggml_cuda_transform_tensor(lt.data, lt.ggml_tensor);
+//                     if (!use_mmap) {
+//                         free(lt.data);
+//                     }
+//                     break;
+// #elif defined(GGML_USE_CLBLAST)
+//                 case GGML_BACKEND_GPU:
+//                     ggml_cl_transform_tensor(lt.data, lt.ggml_tensor);
+//                     if (!use_mmap) {
+//                         free(lt.data);
+//                     }
+//                     break;
+// #endif
+//                 default:
+//                     continue;
+//             }
 
             done_size += lt.size;
         }
@@ -1163,22 +1170,9 @@ static void llama_model_load_internal(
 
         // "output" tensor
         {
-            ggml_backend backend_norm;
-            ggml_backend backend_output;
-            if (n_gpu_layers > int(n_layer)) { // NOLINT
-                // norm is not performance relevant on its own but keeping it in VRAM reduces data copying
-                // on Windows however this is detrimental unless everything is on the GPU
-#ifndef _WIN32
-                backend_norm = low_vram ? GGML_BACKEND_CPU : LLAMA_BACKEND_OFFLOAD;
-#else
-                backend_norm = low_vram || n_gpu_layers <= (int) n_layer + 2 ? GGML_BACKEND_CPU : LLAMA_BACKEND_OFFLOAD;
-#endif // _WIN32
-
-                backend_output = LLAMA_BACKEND_OFFLOAD_SPLIT;
-            } else {
-                backend_norm = GGML_BACKEND_CPU;
-                backend_output = GGML_BACKEND_CPU;
-            }
+            // only gpu for now
+            ggml_backend backend_norm = LLAMA_BACKEND_OFFLOAD;
+            ggml_backend backend_output = LLAMA_BACKEND_OFFLOAD_SPLIT;
 
             model.norm   = ml->get_tensor("norm.weight",   {n_embd},          backend_norm);
             model.output = ml->get_tensor("output.weight", {n_embd, n_vocab}, backend_output);
@@ -1191,11 +1185,11 @@ static void llama_model_load_internal(
         }
 
         const int i_gpu_start = n_layer - n_gpu_layers;
+        const ggml_backend backend = LLAMA_BACKEND_OFFLOAD; // NOLINT
+        const ggml_backend backend_split = LLAMA_BACKEND_OFFLOAD_SPLIT; // NOLINT
 
         model.layers.resize(n_layer);
         for (uint32_t i = 0; i < n_layer; ++i) {
-            const ggml_backend backend = int(i) < i_gpu_start ? GGML_BACKEND_CPU : LLAMA_BACKEND_OFFLOAD; // NOLINT
-            const ggml_backend backend_split = int(i) < i_gpu_start ? GGML_BACKEND_CPU : LLAMA_BACKEND_OFFLOAD_SPLIT; // NOLINT
 
             auto & layer = model.layers[i];
 
@@ -1318,6 +1312,24 @@ static void llama_model_load_internal(
 #endif
 
     ml->load_all_data(progress_callback, progress_callback_user_data, use_mlock ? &model.mlock_mmap : NULL);
+
+// Move layer 1 to GPU
+#ifdef GGML_USE_CUBLAS
+    ggml_cuda_transform_tensor(model.norm->data, model.norm);
+    ggml_cuda_transform_tensor(model.output->data, model.output);
+
+    ggml_cuda_transform_tensor(model.layers[0].attention_norm->data, model.layers[0].attention_norm);
+    ggml_cuda_transform_tensor(model.layers[0].wk->data, model.layers[0].wk);
+    ggml_cuda_transform_tensor(model.layers[0].wq->data, model.layers[0].wq);
+    ggml_cuda_transform_tensor(model.layers[0].wv->data, model.layers[0].wv);
+    ggml_cuda_transform_tensor(model.layers[0].wo->data, model.layers[0].wo);
+
+    ggml_cuda_transform_tensor(model.layers[0].ffn_norm->data, model.layers[0].ffn_norm);
+    
+    ggml_cuda_transform_tensor(model.layers[0].w1->data, model.layers[0].w1);
+    ggml_cuda_transform_tensor(model.layers[0].w2->data, model.layers[0].w2);
+    ggml_cuda_transform_tensor(model.layers[0].w3->data, model.layers[0].w3);
+#endif
 
     if (progress_callback) {
         progress_callback(1.0f, progress_callback_user_data);
@@ -1473,6 +1485,20 @@ static bool llama_eval_internal(
 #endif // GGML_USE_CUBLAS
 
     for (int il = 0; il < n_layer; ++il) {
+#ifdef GGML_USE_CUBLAS
+        ggml_cuda_transform_tensor_reuse(model.layers[il].attention_norm->data, model.layers[0].attention_norm);
+        ggml_cuda_transform_tensor_reuse(model.layers[il].wk->data, model.layers[0].wk);
+        ggml_cuda_transform_tensor_reuse(model.layers[il].wq->data, model.layers[0].wq);
+        ggml_cuda_transform_tensor_reuse(model.layers[il].wv->data, model.layers[0].wv);
+        ggml_cuda_transform_tensor_reuse(model.layers[il].wo->data, model.layers[0].wo);
+
+        ggml_cuda_transform_tensor_reuse(model.layers[il].ffn_norm->data, model.layers[0].ffn_norm);
+        
+        ggml_cuda_transform_tensor_reuse(model.layers[il].w1->data, model.layers[0].w1);
+        ggml_cuda_transform_tensor_reuse(model.layers[il].w2->data, model.layers[0].w2);
+        ggml_cuda_transform_tensor_reuse(model.layers[il].w3->data, model.layers[0].w3);
+#endif // GGML_USE_CUBLAS
+        
         ggml_format_name(inpL, "layer_inp_%d", il);
 
         offload_func_t offload_func = llama_nop;
@@ -1494,7 +1520,7 @@ static bool llama_eval_internal(
             ggml_set_name(cur, "rms_norm_0");
 
             // cur = cur*attention_norm(broadcasted)
-            cur = ggml_mul(ctx0, cur, model.layers[il].attention_norm);
+            cur = ggml_mul(ctx0, cur, model.layers[0].attention_norm);
             offload_func(cur);
             ggml_set_name(cur, "attention_norm_0");
         }
@@ -1502,11 +1528,11 @@ static bool llama_eval_internal(
         // self-attention
         {
             // compute Q and K and RoPE them
-            struct ggml_tensor * tmpk = ggml_mul_mat(ctx0, model.layers[il].wk, cur);
+            struct ggml_tensor * tmpk = ggml_mul_mat(ctx0, model.layers[0].wk, cur);
             offload_func_kq(tmpk);
             ggml_set_name(tmpk, "tmpk");
 
-            struct ggml_tensor * tmpq = ggml_mul_mat(ctx0, model.layers[il].wq, cur);
+            struct ggml_tensor * tmpq = ggml_mul_mat(ctx0, model.layers[0].wq, cur);
             offload_func_kq(tmpq);
             ggml_set_name(tmpq, "tmpq");
 
@@ -1522,7 +1548,7 @@ static bool llama_eval_internal(
             {
                 // compute the transposed [N, n_embd] V matrix
 
-                struct ggml_tensor * tmpv = ggml_mul_mat(ctx0, model.layers[il].wv, cur);
+                struct ggml_tensor * tmpv = ggml_mul_mat(ctx0, model.layers[0].wv, cur);
                 offload_func_v(tmpv);
                 ggml_set_name(tmpv, "tmpv");
 
@@ -1621,7 +1647,7 @@ static bool llama_eval_internal(
 
             // projection (no bias)
             cur = ggml_mul_mat(ctx0,
-                    model.layers[il].wo,
+                    model.layers[0].wo,
                     cur);
             offload_func(cur);
             ggml_set_name(cur, "result_wo");
@@ -1642,19 +1668,19 @@ static bool llama_eval_internal(
                 ggml_set_name(cur, "rms_norm_1");
 
                 // cur = cur*ffn_norm(broadcasted)
-                cur = ggml_mul(ctx0, cur, model.layers[il].ffn_norm);
+                cur = ggml_mul(ctx0, cur, model.layers[0].ffn_norm);
                 offload_func(cur);
                 ggml_set_name(cur, "ffn_norm");
             }
 
             struct ggml_tensor * tmp = ggml_mul_mat(ctx0,
-                    model.layers[il].w3,
+                    model.layers[0].w3,
                     cur);
             offload_func(tmp);
             ggml_set_name(tmp, "result_w3");
 
             cur = ggml_mul_mat(ctx0,
-                    model.layers[il].w1,
+                    model.layers[0].w1,
                     cur);
             offload_func(cur);
             ggml_set_name(cur, "result_w1");
@@ -1669,7 +1695,7 @@ static bool llama_eval_internal(
             ggml_set_name(cur, "silu_x_result_w3");
 
             cur = ggml_mul_mat(ctx0,
-                    model.layers[il].w2,
+                    model.layers[0].w2,
                     cur);
             offload_func(cur);
             ggml_set_name(cur, "result_w2");
@@ -1684,8 +1710,6 @@ static bool llama_eval_internal(
         // ggml_graph_print(&gf);
 
         // input for next layer
-        // inpL = cur;
-        // inpL = ggml_dup_tensor(ctx0, gf.nodes[gf.n_nodes - 1]);
         inpL = gf.nodes[gf.n_nodes - 1];
         inpL->op = GGML_OP_NONE;
         for (int i = 0; i < GGML_MAX_SRC; ++i) {
@@ -1694,31 +1718,6 @@ static bool llama_eval_internal(
             }
         }
         gf = {};
-
-        // inpL = &(struct ggml_tensor) {
-        //     /*.type         =*/ inpL->type,
-        //     /*.backend      =*/ inpL->backend,
-        //     /*.n_dims       =*/ inpL->n_dims,
-        //     /*.ne           =*/ *inpL->ne,
-        //     /*.nb           =*/ *inpL->nb,
-        //     /*.op           =*/ GGML_OP_NONE,
-        //     /*.op_params    =*/ {0},
-        //     /*.is_param     =*/ false,
-        //     /*.grad         =*/ NULL,
-        //     /*.src          =*/ { NULL },
-        //     /*.perf_runs    =*/ 0,
-        //     /*.perf_cycles  =*/ 0,
-        //     /*.perf_time_us =*/ 0,
-        //     /*.data         =*/ inpL->data,
-        //     /*.name         =*/ { 0 },
-        //     /*.extra        =*/ NULL,
-        //     /*.padding      =*/ { 0 },
-        // };
-        // inpL->data = gf.nodes[gf.n_nodes - 1]->data;
-        // LLAMA_ASSERT(inpL->src[0] == NULL);
-        // inpL = gf.nodes[gf.n_nodes - 1];
-        // inpL->src = 
-        // struct ggml_tensor * result = ggml_new_tensor_impl(ctx0, inpL->type, inpL->n_dims, inpL->ne, inpL->data);
     }
 
     lctx.use_buf(ctx0, 0);

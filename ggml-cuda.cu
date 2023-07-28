@@ -3870,6 +3870,68 @@ void ggml_cuda_transform_tensor(void * data, struct ggml_tensor * tensor) {
     tensor->extra = extra;
 }
 
+
+void ggml_cuda_transform_tensor_reuse(void * data, struct ggml_tensor * tensor) {
+    int nrows = ggml_nrows(tensor);
+
+    const int64_t ne0 = tensor->ne[0];
+
+    const size_t nb1 = tensor->nb[1];
+
+    ggml_backend backend = tensor->backend;
+    struct ggml_tensor_extra_gpu * extra = (ggml_tensor_extra_gpu*) tensor->extra;
+
+    for (int id = 0; id < g_device_count; ++id) {
+        if (backend == GGML_BACKEND_GPU && id != g_main_device) {
+            continue;
+        }
+
+        cudaSetDevice(id);
+
+        int row_low, row_high;
+        if (backend == GGML_BACKEND_GPU) {
+            row_low = 0;
+            row_high = nrows;
+        } else if (backend == GGML_BACKEND_GPU_SPLIT) {
+            row_low = id == 0 ? 0 : nrows*g_tensor_split[id];
+            row_high = id == g_device_count - 1 ? nrows : nrows*g_tensor_split[id + 1];
+        } else {
+            GGML_ASSERT(false);
+        }
+        if (row_low == row_high) {
+            continue;
+        }
+
+        int64_t nrows_split = row_high - row_low;
+
+        const size_t offset_split = row_low*nb1;
+        size_t size = ggml_nbytes_split(tensor, nrows_split);
+        const size_t original_size = size;
+
+        // pad last row to a multiple of 512 elements to avoid out-of-bounds memory accesses
+        if (ne0 % MATRIX_ROW_PADDING != 0) {
+            size += (MATRIX_ROW_PADDING - ne0 % MATRIX_ROW_PADDING)
+                * ggml_type_size(tensor->type)/ggml_blck_size(tensor->type);
+        }
+
+        char * buf = (char*) extra->data_device[id];
+        // CUDA_CHECK(cudaMalloc(&buf, size));
+        char * buf_host = (char*)data + offset_split;
+
+        // set padding to 0 to avoid possible NaN values
+        if (size > original_size) {
+            CUDA_CHECK(cudaMemset(buf + original_size, 0, size - original_size));
+        }
+        CUDA_CHECK(cudaMemcpy(buf, buf_host, original_size, cudaMemcpyHostToDevice));
+
+        extra->data_device[id] = buf;
+
+        if (backend == GGML_BACKEND_GPU_SPLIT) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&extra->events[id], cudaEventDisableTiming));
+        }
+    }
+}
+
 void ggml_cuda_free_data(struct ggml_tensor * tensor) {
     if (!tensor || (tensor->backend != GGML_BACKEND_GPU && tensor->backend != GGML_BACKEND_GPU_SPLIT) ) {
         return;

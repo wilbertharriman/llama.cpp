@@ -21,6 +21,7 @@ void * ggml_cuda_host_malloc(size_t size);
 void   ggml_cuda_host_free(void * ptr);
 
 void   ggml_cuda_transform_tensor(void * data, struct ggml_tensor * tensor);
+void   ggml_cuda_transform_tensor_reuse(void * data, struct ggml_tensor * tensor);
 
 void   ggml_cuda_free_data(struct ggml_tensor * tensor);
 void   ggml_cuda_assign_buffers(struct ggml_tensor * tensor);
