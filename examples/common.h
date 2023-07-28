@@ -58,7 +58,7 @@ struct gpt_params {
     std::string cfg_negative_prompt;       // string to help guidance
     float       cfg_scale         = 1.f;   // How strong is guidance
 
-    std::string model             = "models/7B/ggml-model.bin"; // model path
+    std::string model             = "models/7B/ggml-model-q4_0.bin"; // model path
     std::string model_alias       = "unknown"; // model alias
     std::string prompt            = "";
     std::string path_prompt_cache = "";  // path to file for saving/loading prompt eval state

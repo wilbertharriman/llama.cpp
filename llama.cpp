@@ -1679,8 +1679,46 @@ static bool llama_eval_internal(
         offload_func(cur);
         ggml_set_name(cur, "inpFF_+_result_w2");
 
+        ggml_build_forward_expand(&gf, cur);
+        ggml_graph_compute_helper(lctx.work_buffer, &gf, n_threads);
+        // ggml_graph_print(&gf);
+
         // input for next layer
-        inpL = cur;
+        // inpL = cur;
+        // inpL = ggml_dup_tensor(ctx0, gf.nodes[gf.n_nodes - 1]);
+        inpL = gf.nodes[gf.n_nodes - 1];
+        inpL->op = GGML_OP_NONE;
+        for (int i = 0; i < GGML_MAX_SRC; ++i) {
+            if (inpL->src[i]) {
+                inpL->src[i] = NULL;
+            }
+        }
+        gf = {};
+
+        // inpL = &(struct ggml_tensor) {
+        //     /*.type         =*/ inpL->type,
+        //     /*.backend      =*/ inpL->backend,
+        //     /*.n_dims       =*/ inpL->n_dims,
+        //     /*.ne           =*/ *inpL->ne,
+        //     /*.nb           =*/ *inpL->nb,
+        //     /*.op           =*/ GGML_OP_NONE,
+        //     /*.op_params    =*/ {0},
+        //     /*.is_param     =*/ false,
+        //     /*.grad         =*/ NULL,
+        //     /*.src          =*/ { NULL },
+        //     /*.perf_runs    =*/ 0,
+        //     /*.perf_cycles  =*/ 0,
+        //     /*.perf_time_us =*/ 0,
+        //     /*.data         =*/ inpL->data,
+        //     /*.name         =*/ { 0 },
+        //     /*.extra        =*/ NULL,
+        //     /*.padding      =*/ { 0 },
+        // };
+        // inpL->data = gf.nodes[gf.n_nodes - 1]->data;
+        // LLAMA_ASSERT(inpL->src[0] == NULL);
+        // inpL = gf.nodes[gf.n_nodes - 1];
+        // inpL->src = 
+        // struct ggml_tensor * result = ggml_new_tensor_impl(ctx0, inpL->type, inpL->n_dims, inpL->ne, inpL->data);
     }
 
     lctx.use_buf(ctx0, 0);
@@ -1759,11 +1797,9 @@ static bool llama_eval_internal(
         ggml_graph_export(&gf, cgraph_fname);
     }
 
-#ifdef GGML_PERF
     // print timing information per ggml operation (for debugging purposes)
     // requires GGML_PERF to be defined
-    ggml_graph_print(&gf);
-#endif
+    // ggml_graph_print(&gf);
 
     // plot the computation graph in dot format (for debugging purposes)
     //if (n_past%100 == 0) {
