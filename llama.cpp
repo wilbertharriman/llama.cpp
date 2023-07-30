@@ -1486,6 +1486,7 @@ static bool llama_eval_internal(
 
     for (int il = 0; il < n_layer; ++il) {
 #ifdef GGML_USE_CUBLAS
+        int64_t start_time = ggml_time_us();
         ggml_cuda_transform_tensor_reuse(model.layers[il].attention_norm->data, model.layers[0].attention_norm);
         ggml_cuda_transform_tensor_reuse(model.layers[il].wk->data, model.layers[0].wk);
         ggml_cuda_transform_tensor_reuse(model.layers[il].wq->data, model.layers[0].wq);
@@ -1497,6 +1498,7 @@ static bool llama_eval_internal(
         ggml_cuda_transform_tensor_reuse(model.layers[il].w1->data, model.layers[0].w1);
         ggml_cuda_transform_tensor_reuse(model.layers[il].w2->data, model.layers[0].w2);
         ggml_cuda_transform_tensor_reuse(model.layers[il].w3->data, model.layers[0].w3);
+        printf("%ld\n", ggml_time_us() - start_time);
 #endif // GGML_USE_CUBLAS
         
         ggml_format_name(inpL, "layer_inp_%d", il);
